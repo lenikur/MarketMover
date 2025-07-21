@@ -61,6 +61,11 @@ public:
 
 		{
 			std::scoped_lock lock{ _mutex };
+			if (_budget == 0 || _orderCount == 0)
+			{
+				PLOG_INFO << "No budget or orders left to place.";
+				return;
+			}
 			budget = _budget / _orderCount;
 			_budget -= budget;
 			--_orderCount;
