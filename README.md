@@ -9,3 +9,7 @@ The idea is to place limit orders with huge volume that make DOM look like the m
 The small market orders are executed very often and give an impression of the market reaction to DOM.
 
 These limit orders shouldn't be filled; they are just making an impression. So the strategy cares about it.
+
+The strategy can be configured with the parameters described in [Config.h](MarketMover/MarketMover/Config.h)
+
+<img width="1252" height="740" alt="marketmover" src="https://github.com/user-attachments/assets/cc2066b9-8177-4137-91bd-d3fcde11451e" />
