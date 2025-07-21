@@ -6,6 +6,8 @@
 namespace Mover
 {
 
+/// @brief The class is responsible for managing spoof orders.
+/// It places limit orders and keeps them out of filling.
 class SpoofOrderManager : public IOrderConsumer
 {
 public:
@@ -20,22 +22,21 @@ public:
 		{
 			throw std::runtime_error("Budget and order count must be greater than zero");
 		}
-
-		_orderManager.Subscribe(this);
 	}
 
 	~SpoofOrderManager() override
 	{
-		_orderManager.Unsubscribe(this);
 	}
 
-	void CancelAllOrders()
+	void StopSync()
 	{
-		std::scoped_lock lock{ _mutex };
-		for (const auto& order : _orders | std::views::values)
+		if (CancelAllOrders() != 0)
 		{
-			_orderManager.CancelOrder(order.id);
+			std::unique_lock lock{ _mutex };
+			_cv.wait(lock, [this] { return _orders.size() == 0; });
 		}
+
+		PLOG_INFO << "All spoof orders canceled.";
 	}
 
 	bool IsFullyLoaded() const
@@ -55,24 +56,21 @@ public:
 			throw std::runtime_error("DOM is empty");
 		}
 
-		std::scoped_lock lock{ _mutex };
-
 		const auto safePrice{ CalculateSafePrice(dom) };
+		Budget budget{};
+
+		{
+			std::scoped_lock lock{ _mutex };
+			budget = _budget / _orderCount;
+			_budget -= budget;
+			--_orderCount;
+		}
 		
-		const auto budget{ _budget / _orderCount };
-		const auto orderVolume{ CaclulateVolume(safePrice, budget, _commission)};
+		const auto orderVolume{ CaclulateVolume(safePrice, budget, _commissionInCents)};
 
 		if (orderVolume == 0)
 			return;
 
-		const auto trailingOffset{ (_side == OrderSide::Sell ? safePrice - dom.asks.begin()->first : dom.bids.begin()->first - safePrice) / _instrumentInfo.tickSize };
-
-		if (trailingOffset < 0)
-		{
-			// TODO: add metric
-			throw std::runtime_error("Trailing offset is negative");
-		}
-	
 		Order order
 		{
 			.instrument = _instrumentInfo.instrument,
@@ -80,14 +78,18 @@ public:
 			.type = OrderType::Limit,
 			.price = safePrice,
 			.volume = orderVolume,
-			.trailingOffset = trailingOffset,
 			.time = std::chrono::system_clock::now().time_since_epoch().count()
 		};
 		
 		_orderManager.PlaceOrder(order);
 
-		_budget -= budget;
-		--_orderCount;
+		PLOG_INFO << "Spoof order placed: " << order.id << "; Price: " << order.price << "; Volume: " << order.volume;
+	}
+
+	Budget GetRemainingBudget() const
+	{
+		std::scoped_lock lock{ _mutex };
+		return _budget;
 	}
 
 	void OnDOM(const DOMDescription& dom)
@@ -122,7 +124,7 @@ public:
 				_orderManager.ModifyOrder(it->second);
 				_orders.insert({ safePrice, it->second });
 				it = _orders.erase(it);
-			}
+ 			}
 		}
 	}
 
@@ -133,22 +135,33 @@ public:
 			return;
 		}
 
+		PLOG_INFO << "Order change received: " << order.id << "; Status: " << static_cast<int>(order.status)
+			<< "; Price: " << order.price << "; Volume: " << order.volume;
+
 		std::scoped_lock lock{ _mutex };
 		if (order.status == OrderStatus::Filled || order.status == OrderStatus::Canceled)
 		{
-			// TODO: optimize search by using a map with OrderId as key
 			for (auto it = _orders.begin(); it != _orders.end(); ++it)
 			{
 				if (it->second.id == order.id)
 				{
 					_orders.erase(it);
+					if (order.status == OrderStatus::Canceled)
+					{
+						PLOG_INFO << "Order canceled: " << order.id;
+						_budget += (order.volume * order.price + _commissionInCents);
+
+						if (_orders.empty())
+						{
+							_cv.notify_all();
+						}
+					}
 					break;
 				}
 			}
 		}
 		else if (order.status == OrderStatus::Modified)
 		{
-			// TODO: optimize search by using a map with OrderId as key
 			for (auto it = _orders.begin(); it != _orders.end(); ++it)
 			{
 				if (it->second.id == order.id)
@@ -162,7 +175,7 @@ public:
 		else if (order.status == OrderStatus::Rejected)
 		{
 			// TODO: add metric
-			std::cout << "Order rejected: " << order.id << std::endl;
+			PLOG_INFO << "Order rejected: " << order.id ;
 		}
 		else if (order.status == OrderStatus::Placed)
 		{
@@ -171,6 +184,22 @@ public:
 	}
 
 private:
+
+	size_t CancelAllOrders()
+	{
+		std::multimap<Price, Order> orders;
+		{
+			std::scoped_lock lock{ _mutex };
+			orders = _orders;
+		}
+
+		for (const auto& order : orders | std::views::values)
+		{
+			_orderManager.CancelOrder(order);
+		}
+
+		return orders.size();
+	}
 
 	Price CalculateSafePrice(const DOMDescription& dom)
 	{
@@ -194,20 +223,21 @@ private:
 		}
 	}
 
-	Volume CaclulateVolume(Price price, Budget budget, Commission commission)
+	Volume CaclulateVolume(Price price, Budget budget, Commission commissionInCents)
 	{
-		return budget - commission > 0 ? (budget - commission) / price : 0;
+		return budget - commissionInCents > 0 ? (budget - commissionInCents) / price : 0;
 	}
 
 private:
 	IOrderManager& _orderManager;
-	OrderSide _side;
+	const OrderSide _side;
 	InstrumentInfo _instrumentInfo;
 	Budget _budget{ 0 };
 	size_t _orderCount{ 0 };
-	const Commission _commission{ 0 };
+	const Commission _commissionInCents{ 0 };
 	mutable std::mutex _mutex;
 	std::multimap<Price, Order> _orders;
+	std::condition_variable _cv;
 };
 
 }

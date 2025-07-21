@@ -24,14 +24,6 @@ struct DOMDescription
 	std::map<Price, VolumeDescription, std::greater<Price>> bids;
 };
 
-struct BBADescription
-{
-	Price bestAsk{};
-	Volume bestAskVolume{};
-	Price bestBid{};
-	Volume bestBidVolume{};
-};
-
 struct IDOMConsumer
 {
 	virtual ~IDOMConsumer() = default;
@@ -44,34 +36,21 @@ struct IDOMProvider
 	virtual void Subscribe(IDOMConsumer* consumer) = 0;
 	virtual void Unsubscribe(IDOMConsumer* consumer) = 0;
 	virtual DOMDescription GetDOM(Level levels) const = 0;
-	virtual BBADescription GetBBA() const = 0;
 };
 
-class DOMProvider : public IDOMProvider
+void DisplayDOM(const DOMDescription& dom)
 {
-public:
-	void Subscribe(IDOMConsumer* consumer) override
+	PLOG_INFO << "Asks:";
+	for (auto it = dom.asks.rbegin(); it != dom.asks.rend(); ++it)
 	{
-		std::scoped_lock lock(_mutex);
-		_consumers.push_back(consumer);
-	}
-	void Unsubscribe(IDOMConsumer* consumer) override
-	{
-		std::scoped_lock lock(_mutex);
-		_consumers.erase(std::remove(_consumers.begin(), _consumers.end(), consumer), _consumers.end());
-	}
-	DOMDescription GetDOM(Level levels) const override
-	{
-		return {};
-	}
-	BBADescription GetBBA() const override
-	{
-		return {};
+		PLOG_INFO << "Price: " << it->first << ", Volume: " << it->second.volume;
 	}
 
-private:
-	std::mutex _mutex;
-	std::vector<IDOMConsumer*> _consumers;
-};
-
+	PLOG_INFO << "Bids:";
+	for (const auto& [price, desc] : dom.bids)
+	{
+		PLOG_INFO << "Price: " << price << ", Volume: " << desc.volume;
+	}
+	PLOG_INFO << "------------------------";
+}
 }

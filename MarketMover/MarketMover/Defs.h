@@ -22,4 +22,9 @@ OrderSide GetSideFromDirection(MovingDirection direction)
 	return direction == MovingDirection::Up ? OrderSide::Buy : OrderSide::Sell;
 }
 
+MovingDirection GetOppositeDirection(MovingDirection direction)
+{
+	return direction == MovingDirection::Up ? MovingDirection::Down : MovingDirection::Up;
+}
+
 }

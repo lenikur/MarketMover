@@ -9,27 +9,12 @@
 namespace Mover
 {
 
+/// @brief The class is responsible for providing a simulated Depth of Market (DOM) history.
 class DOMProvider : public IDOMProvider
 {
-	std::vector<DOMDescription> GenerateDOMHistory(Level levels, TickSize tickSize, Price bestAsk, Price bestBid, Volume volume)
-	{
-		static size_t stepsCount{ 10 };
-		std::vector<DOMDescription> history;
-		history.reserve(stepsCount);
-
-		for (size_t i = 0; i < 100; ++i)
-		{
-			auto dom = GenerateDOM(levels, tickSize, bestAsk, bestBid, volume);
-			dom = AddDOMNoise(dom, 0.1);
-			history.push_back(std::move(dom));
-		}
-		return history;
-	}
-
 public:
-	DOMProvider(InstrumentInfo instrumentInfo, Level levels)
-		: _instrumentInfo(std::move(instrumentInfo))
-		, _dom{ GenerateDOMHistory(levels, _instrumentInfo.tickSize, 100, 99, 1000) }
+	DOMProvider(MovingDirection movingDirection, Level levels, TickSize tickSize, Price bestAsk, Price bestBid, Volume volume)
+		: _dom{ GenerateDOMHistory(movingDirection, levels, _instrumentInfo.tickSize, bestAsk, bestBid, 1000) }
 		, _notificationThread([this](std::stop_token st) { NotifyConsumers(st); })
 	{
 	}
@@ -38,23 +23,75 @@ public:
 	{
 		std::scoped_lock lock(_mutex);
 		_consumers.insert(consumer);
+		PLOG_INFO << "Subscribed consumer to DOM updates.";
 	}
+
 	void Unsubscribe(IDOMConsumer* consumer) override
 	{
 		std::scoped_lock lock(_mutex);
 		_consumers.erase(consumer);
+		PLOG_INFO << "Unsubscribed consumer from DOM updates.";
 	}
 
 	DOMDescription GetDOM(Level levels) const override
 	{
-		return {};
-	}
-	BBADescription GetBBA() const override
-	{
-		return {};
+		return *std::next(_dom.begin(), _callsCount);
 	}
 
 private:
+	void NotifyConsumers(std::stop_token st)
+	{
+		while (!st.stop_requested())
+		{
+			try
+			{
+				std::scoped_lock lock(_mutex);
+				for (auto consumer : _consumers)
+				{
+					if (consumer)
+						consumer->OnDOM(); // bad practice to call under lock, but for simplicity
+				}
+
+				if ((_callsCount + 1) < _dom.size())
+					++_callsCount;
+			}
+			catch (const std::exception& exc)
+			{
+				PLOG_ERROR << "Exception in DOM notification thread: " << exc.what();
+			}
+
+			std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // simulate periodic updates
+		}
+	}
+
+	static std::deque<DOMDescription> GenerateDOMHistory(MovingDirection movingDirection, Level levels, TickSize tickSize, Price bestAsk, Price bestBid, Volume volume)
+	{
+		static size_t stepsCount{ 10 };
+		std::deque<DOMDescription> history;
+
+		const auto oppositeDirection{ GetOppositeDirection(movingDirection) };
+
+		auto domInitial{ AddDOMNoise(GenerateDOM(levels, tickSize, bestAsk, bestBid, volume), 0.1) };
+		DisplayDOM(domInitial);
+
+		history.push_back(GenerateDOMTrend(domInitial, oppositeDirection, .9));
+		history.push_back(GenerateDOMTrend(domInitial, oppositeDirection, .1));
+		history.push_back(GenerateDOMTrend(domInitial, movingDirection, .1));
+		history.push_back(GenerateDOMTrend(domInitial, movingDirection, .2));
+		history.push_back(GenerateDOMTrend(domInitial, movingDirection, .3));
+		history.push_back(GenerateDOMTrend(domInitial, movingDirection, .4));
+		history.push_back(GenerateDOMTrend(domInitial, movingDirection, .9));
+		history.push_back(MoveDOM(domInitial, movingDirection, tickSize));
+
+		for (auto dom : history)
+		{
+			DisplayDOM(dom);
+		}
+
+		return history;
+	}
+
+
 	static DOMDescription GenerateDOM(Level levels, TickSize tickSize, Price bestAsk, Price bestBid, Volume volume)
 	{
 		DOMDescription dom;
@@ -77,7 +114,7 @@ private:
 				for (auto& [price, desc] : storage)
 				{
 					const auto delta{ desc.volume * deviation };
-					desc.volume += std::max(GenerateVolume(desc.volume - delta, desc.volume + delta), Volume{ 1 });
+					desc.volume = std::max(GenerateVolume(desc.volume - delta, desc.volume + delta), Volume{ 1 });
 				}
 			};
 
@@ -90,42 +127,25 @@ private:
 	// trendPower is in range [0, 1]
 	static DOMDescription GenerateDOMTrend(DOMDescription dom, MovingDirection trendDirection, double trendPower)
 	{
-		const auto koefStep{ trendPower / dom.asks.size() };
+		trendPower = std::min(trendPower, 1.0);
+		trendPower = std::max(trendPower, 0.0);
+
 		const auto invertedTrendPower{ 1.0 - trendPower };
 
-		if (trendDirection == MovingDirection::Up)
+		auto askIt = dom.asks.begin();
+		auto bidIt = dom.bids.begin();
+		for (; askIt != dom.asks.end(); ++askIt, ++bidIt)
 		{
-			auto askIt = dom.asks.begin();
-			auto bidIt = dom.bids.begin();
-			for (Level level{}; askIt != dom.asks.end(); ++level, ++askIt, ++bidIt)
 			{
+				auto& descAsk = askIt->second;
+				auto& descBid = bidIt->second;
+				if (trendDirection == MovingDirection::Down)
 				{
-					auto& desc = askIt->second;
-					desc.volume *= (invertedTrendPower + (koefStep * level));
-					desc.volume = std::max(desc.volume, Volume{ 1 });
+					descBid.volume = std::max(Volume(invertedTrendPower * descAsk.volume), Volume{ 1 });
 				}
+				else
 				{
-					auto& desc = bidIt->second;
-					desc.volume *= (trendPower - (koefStep * level));
-					desc.volume = std::max(desc.volume, Volume{ 1 });
-				}
-			}
-		}
-		else
-		{
-			auto askIt = dom.asks.begin();
-			auto bidIt = dom.bids.begin();
-			for (Level level{}; askIt != dom.asks.end(); ++level, ++askIt, ++bidIt)
-			{
-				{
-					auto& desc = askIt->second;
-					desc.volume *= (trendPower - (koefStep * level));
-					desc.volume = std::max(desc.volume, Volume{ 1 });
-				}
-				{
-					auto& desc = bidIt->second;
-					desc.volume *= (invertedTrendPower + (koefStep * level));
-					desc.volume = std::max(desc.volume, Volume{ 1 });
+					descAsk.volume = std::max(Volume(invertedTrendPower * descBid.volume), Volume{ 1 });
 				}
 			}
 		}
@@ -138,14 +158,14 @@ private:
 		if (trendDirection == MovingDirection::Up)
 		{
 			dom.asks[dom.asks.rbegin()->first + tickSize] = VolumeDescription{ .volume = volume };
-			dom.bids.emplace(dom.asks.begin());
-			dom.bids.erase(dom.bids.begin());
-			dom.asks.erase(std::prev(dom.asks.end()));
+			dom.bids.emplace(*dom.asks.begin());
+			dom.bids.erase(std::prev(dom.bids.end()));
+			dom.asks.erase(dom.asks.begin());
 		}
 		else
 		{
 			dom.bids[dom.bids.rbegin()->first - tickSize] = VolumeDescription{ .volume = volume };
-			dom.asks.emplace(dom.bids.begin());
+			dom.asks.emplace(*dom.bids.begin());
 			dom.asks.erase(std::prev(dom.asks.end()));
 			dom.bids.erase(dom.bids.begin());
 		}
@@ -160,34 +180,13 @@ private:
 		return distribution(generator);
 	}
 
-	void NotifyConsumers(std::stop_token st)
-	{
-		while (!st.stop_requested())
-		{
-			try
-			{
-				std::scoped_lock lock(_mutex);
-				for (auto consumer : _consumers)
-				{
-					if (consumer)
-						consumer->OnDOM();
-				}
-			}
-			catch (const std::exception& exc)
-			{
-				std::cerr << "Exception in DOM notification thread: " << exc.what() << std::endl;
-			}
-		}
-	}
-
 private:
 	const InstrumentInfo _instrumentInfo;
-	std::mutex _domMutex;
-	std::vector<DOMDescription> _dom;
-	size_t _callsCount{ 0 };
+	std::deque<DOMDescription> _dom;
 
-	std::mutex _mutex;
+	mutable std::mutex _mutex;
 	std::unordered_set<IDOMConsumer*> _consumers;
+	std::atomic_int _callsCount{ 0 };
 	std::jthread _notificationThread;
 };
 

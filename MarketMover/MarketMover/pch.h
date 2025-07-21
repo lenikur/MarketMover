@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <vector>
+#include <deque>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -15,4 +16,5 @@
 #include <utility>
 #include <random>
 
+#include <plog/Log.h>
 

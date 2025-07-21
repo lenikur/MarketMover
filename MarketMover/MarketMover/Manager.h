@@ -4,25 +4,29 @@
 #include "MarketMoverStrategy.h"
 #include "Config.h"
 #include "InstrumentProvider.h"
+#include "DOMProvider.h"
+#include "OrderManager.h"
 
 namespace Mover
 {
 
+/// @brief The class bootstraps the Market Mover strategy.
 class Manager : public IStrategyConsumer
 {
 	Price CalculateGoalPrice(Config config)
 	{
-		const auto bba{ _domProvider.GetBBA() };
+		const auto bba{ _domProvider.GetDOM(1) };
 		const auto instrumentInfo{ _instrumentProvider.GetInstrumentInfo(config.instrument) };
 
 		return config.movingDirection == MovingDirection::Up ?
-			bba.bestAsk + instrumentInfo.tickSize * config.movingLevel :
-			bba.bestBid - instrumentInfo.tickSize * config.movingLevel;
+			bba.bids.begin()->first + instrumentInfo.tickSize * config.movingLevel :
+			bba.asks.begin()->first - instrumentInfo.tickSize * config.movingLevel;
 	}
 
 public:
 	explicit Manager(Config config)
-		: _strategy(*this, config, CalculateGoalPrice(config), _instrumentProvider.GetInstrumentInfo(config.instrument), _domProvider, _orderManager)
+		: _domProvider(config.movingDirection, 5, _instrumentProvider.GetInstrumentInfo(config.instrument).tickSize, 1000, 999, 1000)
+		, _strategy(*this, config, CalculateGoalPrice(config), _instrumentProvider.GetInstrumentInfo(config.instrument), _domProvider, _orderManager)
 	{
 	}
 
@@ -34,12 +38,12 @@ public:
 
 	void OnStrategyResult() override
 	{
-		std::cout << "Strategy result received." << std::endl;
-
 		{
 			std::scoped_lock lock{ _doneMutex };
 			_done = true;
 		}
+
+		PLOG_INFO << "Strategy result received. Remaining budget in cents: " << _strategy.GetBudget();
 
 		_doneSignal.notify_all();
 	}
@@ -49,9 +53,9 @@ private:
 	std::condition_variable _doneSignal;
 	bool _done{ false };
 
+	InstrumentProvider _instrumentProvider;
 	OrderManager _orderManager;
 	DOMProvider _domProvider;
-	InstrumentProvider _instrumentProvider;
 	MarketMoverStrategy _strategy;
 };
 
